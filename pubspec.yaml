@@ -1,0 +1,51 @@
+name: mama_meds
+description: "دواء ماما — تطبيق تذكير بمواعيد دواء ماما"
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.11.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_localizations:
+    sdk: flutter
+
+  # Database
+  sqflite: ^2.4.2
+  path: ^1.9.1
+  path_provider: ^2.1.5
+
+  # Notifications & Alarms
+  flutter_local_notifications: ^18.0.1
+  timezone: ^0.10.1
+
+  # Battery / System intents
+  android_intent_plus: ^5.2.0
+
+  # Audio & Alarm Player
+  audioplayers: ^6.1.0
+
+  # Localization & formatting
+  intl: ^0.20.1
+
+  # Settings persistence
+  shared_preferences: ^2.5.3
+
+  # Permissions
+  permission_handler: ^12.0.0+1
+
+  cupertino_icons: ^1.0.8
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/audio/
+    - assets/icon/
