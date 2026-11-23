@@ -78,6 +78,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     if (result != null) {
       await _db.insertMedication(result);
       await _loadSettings();
+      await _notifService.rescheduleAllAlarms();
     }
   }
 
@@ -86,6 +87,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     if (result != null) {
       await _db.updateMedication(result);
       await _loadSettings();
+      await _notifService.rescheduleAllAlarms();
     }
   }
 
@@ -147,6 +149,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     if (confirmed == true) {
       await _db.deleteMedication(med.id!);
       await _loadSettings();
+      await _notifService.rescheduleAllAlarms();
     }
   }
 

@@ -21,11 +21,11 @@ class Medication {
   bool isDoseToday([DateTime? date]) {
     if (frequency != 'alternate_days') return true;
     final target = date ?? DateTime.now();
-    // Reference date (2026-01-01) for stable alternating day calculation
-    final diff = DateTime(target.year, target.month, target.day)
-        .difference(DateTime(2026, 1, 1))
+    // Reference date (2026-01-01 UTC) for stable alternating day calculation (immune to DST)
+    final diff = DateTime.utc(target.year, target.month, target.day)
+        .difference(DateTime.utc(2026, 1, 1))
         .inDays;
-    return diff % 2 == 0;
+    return diff.abs() % 2 == 0;
   }
 
   Medication copyWith({

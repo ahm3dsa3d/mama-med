@@ -157,7 +157,7 @@ class MedicationCard extends StatelessWidget {
               // ─── Taken badge ─────────────────────────────────────────────
               if (isTaken && !isRestDay)
                 Padding(
-                  padding: const EdgeInsets.only(right: 4),
+                  padding: const EdgeInsetsDirectional.only(end: 4),
                   child: Icon(
                     Icons.check_circle,
                     color: AppTheme.takenColor,
