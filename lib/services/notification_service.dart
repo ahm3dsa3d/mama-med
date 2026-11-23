@@ -14,7 +14,9 @@ import '../data/database_helper.dart';
 /// periodIndex: morning=0, afternoon=1, evening=2, beforeBed=3
 /// slotIndex: 0 = base alarm, 1..7 = repeating reminders every ~25 min (up to 3h)
 ///
-/// This gives us deterministic, cancellable IDs for each scheduled reminder.
+/// Both the base alarm and every follow-up reminder repeat daily
+/// (DateTimeComponents.time), so alarms keep firing without the app being
+/// opened. This gives us deterministic, cancellable IDs for each reminder.
 
 class NotificationService {
   static final NotificationService _instance = NotificationService._internal();
@@ -329,7 +331,10 @@ class NotificationService {
 
   /// Schedule alarms for a single period.
   /// - Slot 0: Primary recurring daily base alarm (rings at period time every day).
-  /// - Slots 1..7: Reminders every 25 min (only scheduled for today if pending).
+  /// - Slots 1..7: Recurring daily reminders every 25 min. If today's period is
+  ///   already complete or a slot's time has passed, that slot starts tomorrow;
+  ///   otherwise it also fires today. The chain does not depend on the app
+  ///   being opened again.
   Future<void> _schedulePeriodAlarms(
     MedicationPeriod period, {
     bool isPeriodPendingToday = true,
@@ -440,14 +445,8 @@ class NotificationService {
     for (int i = 1; i <= _maxSlot; i++) {
       final alarmId = period.index2 * 100 + i;
 
-      // If period is complete for today, cancel reminder
-      if (!isPeriodPendingToday) {
-        await _notifications.cancel(alarmId);
-        continue;
-      }
-
       final offsetMinutes = _reminderOffsetMinutes[i];
-      final reminderDt = DateTime(
+      var reminderDt = DateTime(
         now.year,
         now.month,
         now.day,
@@ -455,10 +454,12 @@ class NotificationService {
         periodTime.minute,
       ).add(Duration(minutes: offsetMinutes));
 
-      // Reminders only fire if their time is still in the future TODAY
-      if (reminderDt.isBefore(now)) {
-        await _notifications.cancel(alarmId);
-        continue;
+      // Today's occurrence fires only if the period is still pending and the
+      // slot's time has not passed. Otherwise the recurring chain starts
+      // tomorrow: after mama confirms today's dose, reminders must not ring
+      // again today, but they must ring tomorrow without the app being opened.
+      if (!isPeriodPendingToday || reminderDt.isBefore(now)) {
+        reminderDt = reminderDt.add(const Duration(days: 1));
       }
 
       final reminderTz = tz.TZDateTime(
@@ -521,6 +522,7 @@ class NotificationService {
           androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
           uiLocalNotificationDateInterpretation:
               UILocalNotificationDateInterpretation.absoluteTime,
+          matchDateTimeComponents: DateTimeComponents.time,
         );
       } catch (_) {
         try {
@@ -534,6 +536,7 @@ class NotificationService {
             androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
             uiLocalNotificationDateInterpretation:
                 UILocalNotificationDateInterpretation.absoluteTime,
+            matchDateTimeComponents: DateTimeComponents.time,
           );
         } catch (_) {}
       }
@@ -548,17 +551,17 @@ class NotificationService {
   }
 
   /// Called when mama marks all meds in a period as taken.
-  /// Cancels remaining reminder alarms, dismisses active notification, and ensures tomorrow's recurring base alarm is set.
+  /// Dismisses active notification, stops today's remaining reminders from
+  /// ringing, and re-arms the recurring chain so it resumes tomorrow.
   Future<void> onPeriodCompleted(MedicationPeriod period) async {
     await stopAlarmSound();
     await _notifications.cancel(period.index2 * 100);
-    for (int i = 1; i <= _maxSlot; i++) {
-      await _notifications.cancel(period.index2 * 100 + i);
-    }
     await _schedulePeriodAlarms(period, isPeriodPendingToday: false);
   }
 
-  /// Schedule the midnight reset — reschedules all tomorrow's alarms at 00:01 daily.
+  /// Shows the midnight reset notification at 00:01 daily.
+  /// This is only a quiet notification; alarms no longer depend on it,
+  /// because every alarm repeats daily on its own.
   Future<void> scheduleMidnightReset() async {
     final now = DateTime.now();
     var midnight = DateTime(now.year, now.month, now.day + 1, 0, 1);
