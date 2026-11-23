@@ -99,6 +99,7 @@ class _AppRootState extends State<_AppRoot> {
       await notifService.requestExactAlarmPermission();
       await notifService.rescheduleAllAlarms();
       await notifService.scheduleMidnightReset();
+      await notifService.checkLaunchNotification();
     } catch (e) {
       debugPrint('Error initializing notification services: $e');
     }

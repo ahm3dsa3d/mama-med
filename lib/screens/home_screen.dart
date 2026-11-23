@@ -48,9 +48,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       final today = _db.todayKey;
       if (_lastLoadedDate != null && _lastLoadedDate != today) {
         // Date changed (midnight crossed) — reload fresh state and re-schedule alarms
-        _loadData();
         _scheduleAlarms();
       }
+      _loadData();
     }
   }
 

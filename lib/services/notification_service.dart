@@ -25,7 +25,7 @@ class NotificationService {
   final DatabaseHelper _db = DatabaseHelper();
   final AudioPlayer _audioPlayer = AudioPlayer();
 
-  static const String _channelId = 'mama_meds_alarm_channel_v8';
+  static const String _channelId = 'mama_meds_alarm_channel_v9';
   static const String _channelName = 'منبه دواء ماما (صوت عالي مستمر)';
   static const String _channelDesc = 'تنبيهات مواعيد دواء ماما بصوت المنبه المرتفع المستمر';
 
@@ -96,8 +96,9 @@ class NotificationService {
         .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
 
     try {
-      await android?.deleteNotificationChannel('mama_meds_alarm_channel_v6');
-      await android?.deleteNotificationChannel('mama_meds_alarm_channel_v7');
+      for (int i = 1; i <= 8; i++) {
+        await android?.deleteNotificationChannel('mama_meds_alarm_channel_v$i');
+      }
     } catch (_) {}
 
     const channel = AndroidNotificationChannel(
@@ -174,8 +175,7 @@ class NotificationService {
       channelDescription: _channelDesc,
       importance: Importance.max,
       priority: Priority.high,
-      playSound: soundEnabled,
-      sound: soundEnabled ? const RawResourceAndroidNotificationSound('mama') : null,
+      playSound: false, // Handled cleanly by playAlarmSound() to avoid echo
       enableVibration: vibrationEnabled,
       fullScreenIntent: true,
       category: AndroidNotificationCategory.alarm,
@@ -184,7 +184,6 @@ class NotificationService {
       ticker: title,
       ongoing: true,
       autoCancel: false,
-      additionalFlags: Int32List.fromList([4]), // FLAG_INSISTENT: loops sound continuously
       actions: <AndroidNotificationAction>[
         const AndroidNotificationAction(
           'action_taken',
@@ -216,6 +215,21 @@ class NotificationService {
       notifDetails,
       payload: 'test',
     );
+  }
+
+  /// Check if the app was launched by a notification action while terminated
+  Future<void> checkLaunchNotification() async {
+    try {
+      final details = await _notifications.getNotificationAppLaunchDetails();
+      if (details != null && details.didNotificationLaunchApp) {
+        final response = details.notificationResponse;
+        if (response != null) {
+          await _onNotificationTapped(response);
+        }
+      }
+    } catch (e) {
+      debugPrint('Error checking launch notification: $e');
+    }
   }
 
   Future<void> _onNotificationTapped(NotificationResponse response) async {
@@ -302,6 +316,12 @@ class NotificationService {
 
     for (final period in allPeriods) {
       final periodEnum = MedicationPeriod.fromKey(period);
+      final meds = await _db.getMedicationsByPeriod(period);
+      if (meds.isEmpty) {
+        // No medications configured for this period — cancel any alarms
+        await cancelPeriodAlarms(periodEnum);
+        continue;
+      }
       final isPending = pendingPeriods.contains(period);
       await _schedulePeriodAlarms(periodEnum, isPeriodPendingToday: isPending);
     }
