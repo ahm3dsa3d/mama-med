@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:sqflite/sqflite.dart';
 import 'package:path/path.dart';
 import '../models/medication.dart';
@@ -5,45 +6,43 @@ import '../models/medication.dart';
 class DatabaseHelper {
   static final DatabaseHelper _instance = DatabaseHelper._internal();
   factory DatabaseHelper() => _instance;
-  DatabaseHelper._internal();
+  DatabaseHelper._internal() : _databasePath = null;
 
-  static Database? _database;
+  /// A separate database for regression tests, never the installed app's data.
+  @visibleForTesting
+  DatabaseHelper.forTesting(String databasePath) : _databasePath = databasePath;
 
-  Future<Database> get database async {
-    _database ??= await _initDatabase();
-    return _database!;
+  final String? _databasePath;
+  Future<Database>? _database;
+
+  Future<Database> get database => _database ??= _initDatabase();
+
+  Future<void> close() async {
+    final pending = _database;
+    _database = null;
+    if (pending != null) await (await pending).close();
   }
 
   Future<Database> _initDatabase() async {
-    final dbPath = await getDatabasesPath();
-    final path = join(dbPath, 'mama_meds.db');
-
-    final db = await openDatabase(
+    final path =
+        _databasePath ?? join(await getDatabasesPath(), 'mama_meds.db');
+    return openDatabase(
       path,
       version: 2,
       onCreate: _onCreate,
       onUpgrade: (db, oldVersion, newVersion) async {
         if (oldVersion < 2) {
-          try {
+          // Migrate structure only. A medicine's name cannot determine its
+          // prescribed frequency. Keep any frequency already stored by the user.
+          final columns = await db.rawQuery('PRAGMA table_info(medications)');
+          if (!columns.any((column) => column['name'] == 'frequency')) {
             await db.execute(
-                "ALTER TABLE medications ADD COLUMN frequency TEXT NOT NULL DEFAULT 'daily'");
-            // Update existing alternate-day seeds if present
-            await db.execute(
-                "UPDATE medications SET frequency = 'alternate_days' WHERE name LIKE '%اكسامايد%' OR name LIKE '%كوليروز%'");
-          } catch (_) {}
+              "ALTER TABLE medications ADD COLUMN frequency TEXT NOT NULL DEFAULT 'daily'",
+            );
+          }
         }
       },
     );
-
-    // Safety check to ensure column exists
-    try {
-      await db.execute(
-          "ALTER TABLE medications ADD COLUMN frequency TEXT NOT NULL DEFAULT 'daily'");
-      await db.execute(
-          "UPDATE medications SET frequency = 'alternate_days' WHERE name LIKE '%اكسامايد%' OR name LIKE '%كوليروز%'");
-    } catch (_) {}
-
-    return db;
   }
 
   Future<void> _onCreate(Database db, int version) async {
