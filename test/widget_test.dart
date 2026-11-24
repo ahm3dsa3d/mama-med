@@ -41,6 +41,10 @@ void main() {
       },
     );
     messenger.setMockMethodCallHandler(
+      const MethodChannel('be.tramckrijte.workmanager/foreground_channel'),
+      (_) async => true,
+    );
+    messenger.setMockMethodCallHandler(
       const MethodChannel('dexterous.com/flutter/local_notifications'),
       (call) async {
         if (call.method == 'getNotificationAppLaunchDetails') {
