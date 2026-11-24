@@ -7,37 +7,77 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:timezone/data/latest.dart' as tz;
 import 'package:timezone/timezone.dart' as tz;
+import 'package:workmanager/workmanager.dart';
 import '../models/medication.dart';
 import '../data/database_helper.dart';
 
-/// Notification IDs follow the scheme: periodIndex * 100 + slotIndex
-/// periodIndex: morning=0, afternoon=1, evening=2, beforeBed=3
-/// slotIndex: 0 = base alarm, 1..7 = repeating reminders every ~25 min (up to 3h)
+/// Notification IDs:
+/// - Legacy base alarm: periodIndex * 100 + 0 (cancelled and superseded).
+/// - Base alarm + follow-up reminders: periodIndex * 1000 + dayOffset * 10 +
+///   slotIndex, one-shot alarms per upcoming dose day (dayOffset 0..6;
+///   slot 0 = base alarm at the period time, slots 1..7 = reminders every
+///   ~25 min for up to 3h). They are only scheduled for days with a dose due,
+///   so rest days of alternate-day medications stay fully silent, and they
+///   are re-armed on every app run and by the daily background task, so they
+///   do not depend on opening the app the same day.
+///   periodIndex: morning=0, afternoon=1, evening=2, beforeBed=3.
 ///
-/// This gives us deterministic, cancellable IDs for each scheduled reminder.
+/// This gives us deterministic, cancellable IDs for each scheduled alarm.
+
+/// Background entry point for the daily re-arm task. WorkManager wakes the
+/// app about once a day (Android may delay it), recomputes all alarms for
+/// the upcoming dose days, and exits; no user interaction is required.
+@pragma('vm:entry-point')
+void alarmRefreshCallback() {
+  Workmanager().executeTask((task, inputData) async {
+    try {
+      WidgetsFlutterBinding.ensureInitialized();
+      await NotificationService().initialize();
+      await NotificationService().rescheduleAllAlarms();
+    } catch (_) {}
+    return true;
+  });
+}
 
 class NotificationService {
   static final NotificationService _instance = NotificationService._internal();
   factory NotificationService() => _instance;
   NotificationService._internal();
 
-  final FlutterLocalNotificationsPlugin _notifications = FlutterLocalNotificationsPlugin();
+  final FlutterLocalNotificationsPlugin _notifications =
+      FlutterLocalNotificationsPlugin();
   final DatabaseHelper _db = DatabaseHelper();
   final AudioPlayer _audioPlayer = AudioPlayer();
 
   static const String _channelId = 'mama_meds_alarm_channel_v9';
   static const String _channelName = 'منبه دواء ماما (صوت عالي مستمر)';
-  static const String _channelDesc = 'تنبيهات مواعيد دواء ماما بصوت المنبه المرتفع المستمر';
+  static const String _channelDesc =
+      'تنبيهات مواعيد دواء ماما بصوت المنبه المرتفع المستمر';
 
   // Reminder slots: 0 min, 25 min, 50 min, ..., 175 min (7 reminders over 3 hours)
-  static const List<int> _reminderOffsetMinutes = [0, 25, 50, 75, 100, 125, 150, 175];
+  static const List<int> _reminderOffsetMinutes = [
+    0,
+    25,
+    50,
+    75,
+    100,
+    125,
+    150,
+    175,
+  ];
   static const int _maxSlot = 7;
+
+  // How many days ahead follow-up reminders are armed. Covers at least 3 dose
+  // days for alternate-day medications; topped up on every app run.
+  static const int _horizonDays = 7;
 
   Future<void> initialize() async {
     tz.initializeTimeZones();
     await _setLocalTimezone();
 
-    const androidSettings = AndroidInitializationSettings('@mipmap/ic_launcher');
+    const androidSettings = AndroidInitializationSettings(
+      '@mipmap/ic_launcher',
+    );
     const iosSettings = DarwinInitializationSettings(
       requestAlertPermission: true,
       requestBadgePermission: true,
@@ -56,7 +96,9 @@ class NotificationService {
     // 1. Try fetching exact native IANA timezone from Android via MethodChannel
     try {
       const channel = MethodChannel('com.mamameds.app/timezone');
-      final String? nativeTimezone = await channel.invokeMethod<String>('getLocalTimezone');
+      final String? nativeTimezone = await channel.invokeMethod<String>(
+        'getLocalTimezone',
+      );
       if (nativeTimezone != null && nativeTimezone.isNotEmpty) {
         tz.setLocalLocation(tz.getLocation(nativeTimezone));
         return;
@@ -93,7 +135,9 @@ class NotificationService {
 
   Future<void> _createNotificationChannel() async {
     final android = _notifications
-        .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
+        .resolvePlatformSpecificImplementation<
+          AndroidFlutterLocalNotificationsPlugin
+        >();
 
     try {
       for (int i = 1; i <= 8; i++) {
@@ -129,15 +173,17 @@ class NotificationService {
     try {
       await wakeUpScreen();
       await _audioPlayer.stop();
-      await _audioPlayer.setAudioContext(AudioContext(
-        android: const AudioContextAndroid(
-          isSpeakerphoneOn: true,
-          stayAwake: true,
-          contentType: AndroidContentType.sonification,
-          usageType: AndroidUsageType.alarm,
-          audioFocus: AndroidAudioFocus.gainTransientExclusive,
+      await _audioPlayer.setAudioContext(
+        AudioContext(
+          android: const AudioContextAndroid(
+            isSpeakerphoneOn: true,
+            stayAwake: true,
+            contentType: AndroidContentType.sonification,
+            usageType: AndroidUsageType.alarm,
+            audioFocus: AndroidAudioFocus.gainTransientExclusive,
+          ),
         ),
-      ));
+      );
       await _audioPlayer.setReleaseMode(ReleaseMode.loop);
       await _audioPlayer.setVolume(1.0);
       await _audioPlayer.play(AssetSource('audio/mama.mp4'));
@@ -166,7 +212,8 @@ class NotificationService {
     }
 
     const String title = '💊 تنبيه: موعد دواء ماما';
-    const String body = 'حان موعد تناول الدواء يا ماما 🌸 اضغطي هنا لتأكيد تناول الدواء';
+    const String body =
+        'حان موعد تناول الدواء يا ماما 🌸 اضغطي هنا لتأكيد تناول الدواء';
 
     // 3. Display notification banner with insistent loop and action button
     final androidDetails = AndroidNotificationDetails(
@@ -208,13 +255,7 @@ class NotificationService {
       ),
     );
 
-    await _notifications.show(
-      888,
-      title,
-      body,
-      notifDetails,
-      payload: 'test',
-    );
+    await _notifications.show(888, title, body, notifDetails, payload: 'test');
   }
 
   /// Check if the app was launched by a notification action while terminated
@@ -249,7 +290,9 @@ class NotificationService {
   Future<bool> requestNotificationPermission() async {
     try {
       final android = _notifications
-          .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
+          .resolvePlatformSpecificImplementation<
+            AndroidFlutterLocalNotificationsPlugin
+          >();
       if (android != null) {
         final granted = await android.requestNotificationsPermission();
         if (granted == true) return true;
@@ -266,7 +309,9 @@ class NotificationService {
   Future<bool> requestExactAlarmPermission() async {
     try {
       final android = _notifications
-          .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
+          .resolvePlatformSpecificImplementation<
+            AndroidFlutterLocalNotificationsPlugin
+          >();
       if (android != null) {
         final granted = await android.requestExactAlarmsPermission();
         return granted ?? true;
@@ -292,7 +337,8 @@ class NotificationService {
 
   Future<void> setPeriodTime(String period, TimeOfDay time) async {
     final prefs = await SharedPreferences.getInstance();
-    final formatted = '${time.hour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}';
+    final formatted =
+        '${time.hour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}';
     await prefs.setString('period_time_$period', formatted);
   }
 
@@ -328,8 +374,12 @@ class NotificationService {
   }
 
   /// Schedule alarms for a single period.
-  /// - Slot 0: Primary recurring daily base alarm (rings at period time every day).
-  /// - Slots 1..7: Reminders every 25 min (only scheduled for today if pending).
+  /// - Slot 0: base alarm at the period time, one-shot per upcoming dose day.
+  /// - Slots 1..7: follow-up reminders every ~25 min per upcoming dose day.
+  ///   Today's alarms only arm while the period is still pending; days without
+  ///   a dose due (alternate-day rest days) get no alarms at all. Re-armed on
+  ///   every app run and by the daily background task, so alarms do not depend
+  ///   on opening the app the same day.
   Future<void> _schedulePeriodAlarms(
     MedicationPeriod period, {
     bool isPeriodPendingToday = true,
@@ -340,225 +390,160 @@ class NotificationService {
     final now = DateTime.now();
 
     final String title = '${period.emoji} ${period.arabicLabel}';
+    final meds = await _db.getMedicationsByPeriod(period.key);
 
-    // ─── 1. Primary Daily Base Alarm (Slot 0) ──────────────────────────────
-    final alarmId0 = period.index2 * 100 + 0;
-    var baseDt = DateTime(
-      now.year,
-      now.month,
-      now.day,
-      periodTime.hour,
-      periodTime.minute,
-    );
-
-    // If today's period is already complete or its time passed, schedule for tomorrow
-    if (!isPeriodPendingToday || baseDt.isBefore(now)) {
-      baseDt = baseDt.add(const Duration(days: 1));
+    // Clear previous alarms: legacy ids (daily base + same-day follow-ups)
+    // and the per-day horizon range.
+    for (int i = 0; i <= _maxSlot; i++) {
+      await _notifications.cancel(period.index2 * 100 + i);
+    }
+    for (int d = 0; d < _horizonDays; d++) {
+      for (int i = 0; i <= _maxSlot; i++) {
+        await _notifications.cancel(period.index2 * 1000 + d * 10 + i);
+      }
     }
 
-    final baseTz = tz.TZDateTime(
-      tz.local,
-      baseDt.year,
-      baseDt.month,
-      baseDt.day,
-      baseDt.hour,
-      baseDt.minute,
-    );
+    // ─── Base (slot 0) + Follow-up Alarms (slots 1..7), per dose day ──────
+    //
+    // One-shot alarms per upcoming dose day: slot 0 rings at the period
+    // time, slots 1..7 every ~25 minutes afterward for up to 3 hours or
+    // until confirmed. Days without a dose due (alternate-day rest days)
+    // stay fully silent. The set is re-armed on every app run and by the
+    // daily background task (WorkManager), so delivery no longer depends on
+    // opening the app the same day and a stale horizon cannot leave future
+    // dose days unarmed. Today's alarms arm only while the period is still
+    // pending: after a confirmation today's chain is cancelled and the next
+    // dose day still has its alarms armed.
+    for (int d = 0; d < _horizonDays; d++) {
+      // Skip today's alarms when the period was already confirmed today:
+      // the chain is cancelled on confirmation and resumes next dose day.
+      if (d == 0 && !isPeriodPendingToday) continue;
+      final day = DateTime(now.year, now.month, now.day + d);
+      final hasDose = meds.any((m) => m.isDoseToday(day));
+      if (!hasDose) continue; // rest day: no dose due, no alarms
 
-    final String baseBody = 'حان وقت دواء ${period.arabicLabel} يا ماما 💊';
+      for (int i = 0; i <= _maxSlot; i++) {
+        final alarmId = period.index2 * 1000 + d * 10 + i;
+        final reminderDt = DateTime(
+          day.year,
+          day.month,
+          day.day,
+          periodTime.hour,
+          periodTime.minute,
+        ).add(Duration(minutes: _reminderOffsetMinutes[i]));
 
-    final baseDetails = NotificationDetails(
-      android: AndroidNotificationDetails(
-        _channelId,
-        _channelName,
-        channelDescription: _channelDesc,
-        importance: Importance.max,
-        priority: Priority.high,
-        playSound: soundEnabled,
-        sound: soundEnabled ? const RawResourceAndroidNotificationSound('mama') : null,
-        enableVibration: vibrationEnabled,
-        fullScreenIntent: true,
-        category: AndroidNotificationCategory.alarm,
-        audioAttributesUsage: AudioAttributesUsage.alarm,
-        visibility: NotificationVisibility.public,
-        ticker: title,
-        autoCancel: false,
-        ongoing: true,
-        additionalFlags: Int32List.fromList([4]), // FLAG_INSISTENT: loops sound continuously
-        actions: <AndroidNotificationAction>[
-          const AndroidNotificationAction(
-            'action_taken',
-            'تم تناول الدواء ✅',
-            showsUserInterface: true,
-            cancelNotification: true,
-          ),
-        ],
-        styleInformation: BigTextStyleInformation(
-          baseBody,
-          contentTitle: title,
-          summaryText: 'دواء ماما 💊',
-        ),
-      ),
-      iOS: DarwinNotificationDetails(
-        presentAlert: true,
-        presentBadge: true,
-        presentSound: soundEnabled,
-      ),
-    );
+        // Skip times already past.
+        if (reminderDt.isBefore(now)) continue;
 
-    try {
-      await _notifications.zonedSchedule(
-        alarmId0,
-        title,
-        baseBody,
-        baseTz,
-        baseDetails,
-        payload: period.key,
-        androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
-        uiLocalNotificationDateInterpretation:
-            UILocalNotificationDateInterpretation.absoluteTime,
-        matchDateTimeComponents: DateTimeComponents.time,
-      );
-    } catch (_) {
-      try {
-        await _notifications.zonedSchedule(
-          alarmId0,
-          title,
-          baseBody,
-          baseTz,
-          baseDetails,
-          payload: period.key,
-          androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
-          uiLocalNotificationDateInterpretation:
-              UILocalNotificationDateInterpretation.absoluteTime,
-          matchDateTimeComponents: DateTimeComponents.time,
+        final String body = i == 0
+            ? 'حان وقت دواء ${period.arabicLabel} يا ماما 💊'
+            : 'تذكير: لم يتم أخذ أدوية ${period.arabicLabel} بعد 💊';
+        final reminderTz = tz.TZDateTime(
+          tz.local,
+          reminderDt.year,
+          reminderDt.month,
+          reminderDt.day,
+          reminderDt.hour,
+          reminderDt.minute,
         );
-      } catch (_) {}
-    }
 
-    // ─── 2. Follow-up Reminders (Slots 1..7) ────────────────────────────────
-    for (int i = 1; i <= _maxSlot; i++) {
-      final alarmId = period.index2 * 100 + i;
-
-      // If period is complete for today, cancel reminder
-      if (!isPeriodPendingToday) {
-        await _notifications.cancel(alarmId);
-        continue;
-      }
-
-      final offsetMinutes = _reminderOffsetMinutes[i];
-      final reminderDt = DateTime(
-        now.year,
-        now.month,
-        now.day,
-        periodTime.hour,
-        periodTime.minute,
-      ).add(Duration(minutes: offsetMinutes));
-
-      // Reminders only fire if their time is still in the future TODAY
-      if (reminderDt.isBefore(now)) {
-        await _notifications.cancel(alarmId);
-        continue;
-      }
-
-      final reminderTz = tz.TZDateTime(
-        tz.local,
-        reminderDt.year,
-        reminderDt.month,
-        reminderDt.day,
-        reminderDt.hour,
-        reminderDt.minute,
-      );
-
-      final String reminderBody = 'تذكير: لم يتم أخذ أدوية ${period.arabicLabel} بعد 💊';
-      final reminderDetails = NotificationDetails(
-        android: AndroidNotificationDetails(
-          _channelId,
-          _channelName,
-          channelDescription: _channelDesc,
-          importance: Importance.max,
-          priority: Priority.high,
-          playSound: soundEnabled,
-          sound: soundEnabled ? const RawResourceAndroidNotificationSound('mama') : null,
-          enableVibration: vibrationEnabled,
-          fullScreenIntent: true,
-          category: AndroidNotificationCategory.alarm,
-          audioAttributesUsage: AudioAttributesUsage.alarm,
-          visibility: NotificationVisibility.public,
-          ticker: title,
-          autoCancel: false,
-          ongoing: true,
-          additionalFlags: Int32List.fromList([4]),
-          actions: <AndroidNotificationAction>[
-            const AndroidNotificationAction(
-              'action_taken',
-              'تم تناول الدواء ✅',
-              showsUserInterface: true,
-              cancelNotification: true,
+        final details = NotificationDetails(
+          android: AndroidNotificationDetails(
+            _channelId,
+            _channelName,
+            channelDescription: _channelDesc,
+            importance: Importance.max,
+            priority: Priority.high,
+            playSound: soundEnabled,
+            sound: soundEnabled
+                ? const RawResourceAndroidNotificationSound('mama')
+                : null,
+            enableVibration: vibrationEnabled,
+            fullScreenIntent: true,
+            category: AndroidNotificationCategory.alarm,
+            audioAttributesUsage: AudioAttributesUsage.alarm,
+            visibility: NotificationVisibility.public,
+            ticker: title,
+            autoCancel: false,
+            ongoing: true,
+            additionalFlags: Int32List.fromList([4]), // FLAG_INSISTENT
+            actions: <AndroidNotificationAction>[
+              const AndroidNotificationAction(
+                'action_taken',
+                'تم تناول الدواء ✅',
+                showsUserInterface: true,
+                cancelNotification: true,
+              ),
+            ],
+            styleInformation: BigTextStyleInformation(
+              body,
+              contentTitle: title,
+              summaryText: 'دواء ماما 💊',
             ),
-          ],
-          styleInformation: BigTextStyleInformation(
-            reminderBody,
-            contentTitle: title,
-            summaryText: 'دواء ماما 💊',
           ),
-        ),
-        iOS: DarwinNotificationDetails(
-          presentAlert: true,
-          presentBadge: true,
-          presentSound: soundEnabled,
-        ),
-      );
-
-      try {
-        await _notifications.zonedSchedule(
-          alarmId,
-          title,
-          reminderBody,
-          reminderTz,
-          reminderDetails,
-          payload: period.key,
-          androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
-          uiLocalNotificationDateInterpretation:
-              UILocalNotificationDateInterpretation.absoluteTime,
+          iOS: DarwinNotificationDetails(
+            presentAlert: true,
+            presentBadge: true,
+            presentSound: soundEnabled,
+          ),
         );
-      } catch (_) {
+
         try {
           await _notifications.zonedSchedule(
             alarmId,
             title,
-            reminderBody,
+            body,
             reminderTz,
-            reminderDetails,
+            details,
             payload: period.key,
-            androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
+            androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
             uiLocalNotificationDateInterpretation:
                 UILocalNotificationDateInterpretation.absoluteTime,
           );
-        } catch (_) {}
+        } catch (_) {
+          try {
+            await _notifications.zonedSchedule(
+              alarmId,
+              title,
+              body,
+              reminderTz,
+              details,
+              payload: period.key,
+              androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
+              uiLocalNotificationDateInterpretation:
+                  UILocalNotificationDateInterpretation.absoluteTime,
+            );
+          } catch (_) {}
+        }
       }
     }
   }
 
-  /// Cancel ALL pending alarms for a specific period (slots 0..7)
+  /// Cancel ALL pending alarms for a specific period (base + all follow-ups)
   Future<void> cancelPeriodAlarms(MedicationPeriod period) async {
     for (int i = 0; i <= _maxSlot; i++) {
       await _notifications.cancel(period.index2 * 100 + i);
     }
+    for (int d = 0; d < _horizonDays; d++) {
+      for (int i = 0; i <= _maxSlot; i++) {
+        await _notifications.cancel(period.index2 * 1000 + d * 10 + i);
+      }
+    }
   }
 
   /// Called when mama marks all meds in a period as taken.
-  /// Cancels remaining reminder alarms, dismisses active notification, and ensures tomorrow's recurring base alarm is set.
+  /// Dismisses active notification, stops today's remaining reminders from
+  /// ringing, and re-arms the recurring chain so it resumes tomorrow.
   Future<void> onPeriodCompleted(MedicationPeriod period) async {
     await stopAlarmSound();
     await _notifications.cancel(period.index2 * 100);
-    for (int i = 1; i <= _maxSlot; i++) {
-      await _notifications.cancel(period.index2 * 100 + i);
-    }
     await _schedulePeriodAlarms(period, isPeriodPendingToday: false);
   }
 
-  /// Schedule the midnight reset — reschedules all tomorrow's alarms at 00:01 daily.
+  /// Shows the midnight reset notification at 00:01 daily.
+  /// This is only a quiet notification; alarms do not depend on it, because
+  /// dose-day alarms are re-armed on every app run and by the daily
+  /// background task.
   Future<void> scheduleMidnightReset() async {
     final now = DateTime.now();
     var midnight = DateTime(now.year, now.month, now.day + 1, 0, 1);
