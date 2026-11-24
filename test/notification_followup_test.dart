@@ -9,12 +9,13 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:timezone/timezone.dart' as tz;
 
-/// Regression tests for follow-up reminder reliability.
+/// Regression tests for alarm reliability (base + follow-up reminders).
 ///
-/// Follow-up reminders (every 25 minutes after a period's base alarm) must be
-/// armed for upcoming dose days without depending on the app being opened the
-/// same day, and must never fire on rest days of alternate-day medications or
-/// after the day's dose is confirmed.
+/// The base alarm and its follow-up reminders (every 25 minutes) must be
+/// armed as per-dose-day one-shots for upcoming dose days without depending
+/// on the app being opened the same day, must never fire on rest days of
+/// alternate-day medications, and must stop after the day's dose is
+/// confirmed.
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
@@ -26,13 +27,14 @@ void main() {
   const morningHour = 23;
   const morningMinute = 58;
 
-  // Morning index2 is 0, so follow-up ids are dayOffset * 10 + slot;
-  // day 0 reuses the legacy id range 1..7.
+  // Morning index2 is 0, so alarm ids are dayOffset * 10 + slot with
+  // slot 0 the base alarm and slots 1..7 the follow-ups; day 0 reuses the
+  // legacy id range 0..7.
   int followupId(int dayOffset, int slot) => dayOffset * 10 + slot;
   bool isFollowupId(int id) {
     final day = id ~/ 10;
     final slot = id % 10;
-    return id >= 1 && id <= 67 && day <= 6 && slot >= 1 && slot <= 7;
+    return id >= 0 && id <= 67 && day <= 6 && slot >= 0 && slot <= 7;
   }
 
   const alternateProbe = Medication(
@@ -67,6 +69,10 @@ void main() {
         }
         return null;
       },
+    );
+    messenger.setMockMethodCallHandler(
+      const MethodChannel('be.tramckrijte.workmanager/foreground_channel'),
+      (_) async => true,
     );
     messenger.setMockMethodCallHandler(
       const MethodChannel('com.mamameds.app/timezone'),
@@ -157,21 +163,22 @@ void main() {
       (call.arguments as Map)['matchDateTimeComponents'],
       isNull,
       reason:
-          'follow-ups must be per-day one-shots so rest days stay silent, id '
+          'every alarm must be a per-day one-shot so rest days stay silent, id '
           '${(call.arguments as Map)['id']}',
     );
   }
 
-  test('daily-dose period: every follow-up slot is armed one-shot for each of '
-      'the next 7 days, without needing the app that day', () async {
+  test('daily-dose period: base alarm and every follow-up slot are armed '
+      'one-shot for each of the next 7 days, without needing the app that '
+      'day', () async {
     await seedMorning(frequency: 'daily');
     final now = DateTime.now();
     await NotificationService().rescheduleAllAlarms();
 
     final schedules = followupSchedules();
-    expect(schedules, hasLength(7 * 7));
+    expect(schedules, hasLength(7 * 8));
     for (var d = 0; d < 7; d++) {
-      for (var slot = 1; slot <= 7; slot++) {
+      for (var slot = 0; slot <= 7; slot++) {
         final id = followupId(d, slot);
         final call = schedules.firstWhere(
           (c) => (c.arguments as Map)['id'] == id,
@@ -186,8 +193,8 @@ void main() {
     }
   });
 
-  test('alternate-day-only period: no reminders on rest days, reminders armed '
-      'on dose days', () async {
+  test('alternate-day-only period: fully silent on rest days (no base alarm '
+      'and no reminders), fully armed on dose days', () async {
     await seedMorning(frequency: 'alternate_days');
     final now = DateTime.now();
     await NotificationService().rescheduleAllAlarms();
@@ -206,7 +213,7 @@ void main() {
             'day offset $d ${doseDue ? "has a dose due and must be armed" : "is a rest day and must stay silent"}',
       );
       if (doseDue) {
-        for (var slot = 1; slot <= 7; slot++) {
+        for (var slot = 0; slot <= 7; slot++) {
           final id = followupId(d, slot);
           final call = schedules.firstWhere(
             (c) => (c.arguments as Map)['id'] == id,
@@ -238,7 +245,7 @@ void main() {
       isFalse,
       reason: 'today must be silent after confirmation',
     );
-    expect(schedules, hasLength(6 * 7));
+    expect(schedules, hasLength(6 * 8));
     final tomorrowStart = DateTime(now.year, now.month, now.day + 1);
     for (final call in schedules) {
       expectOneShot(call);
@@ -253,19 +260,38 @@ void main() {
       await seedMorning(frequency: 'daily');
       await NotificationService().rescheduleAllAlarms();
 
-      // evening index2 is 2: base id 200, legacy ids 201..207, horizon ids
-      // 2000 + d * 10 + slot.
+      // evening index2 is 2: legacy ids 200..207, horizon ids
+      // 2000 + d * 10 + slot (slot 0..7).
       bool isEveningId(int id) =>
-          id == 200 ||
-          (id >= 201 && id <= 207) ||
-          (id >= 2001 && id <= 2067);
+          (id >= 200 && id <= 207) ||
+          (id >= 2000 && id <= 2067 && id % 10 <= 7);
       expect(cancelsFor(isEveningId), isNotEmpty);
       expect(
-        followupSchedules().where(
-          (c) => ((c.arguments as Map)['id'] as int) >= 2000,
+        captured.where(
+          (c) =>
+              c.method == 'zonedSchedule' &&
+              isEveningId((c.arguments as Map)['id'] as int),
         ),
         isEmpty,
       );
     },
   );
+
+  test('no daily-recurring alarm remains: every scheduled alarm is a '
+      'one-shot (rest-day silence cannot leak through repetition)', () async {
+    await seedMorning(frequency: 'daily');
+    await NotificationService().rescheduleAllAlarms();
+
+    final schedules = captured
+        .where((c) => c.method == 'zonedSchedule')
+        .toList();
+    expect(schedules, isNotEmpty);
+    for (final call in schedules) {
+      expect(
+        (call.arguments as Map)['matchDateTimeComponents'],
+        isNull,
+        reason: 'id ${(call.arguments as Map)['id']} must not repeat daily',
+      );
+    }
+  });
 }
