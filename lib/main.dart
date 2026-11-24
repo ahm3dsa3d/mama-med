@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:intl/date_symbol_data_local.dart';
 import 'package:intl/intl.dart';
+import 'package:workmanager/workmanager.dart';
 import 'services/notification_service.dart';
 import 'services/battery_service.dart';
 import 'screens/home_screen.dart';
@@ -100,6 +101,18 @@ class _AppRootState extends State<_AppRoot> {
       await notifService.rescheduleAllAlarms();
       await notifService.scheduleMidnightReset();
       await notifService.checkLaunchNotification();
+
+      // Daily background re-arm: WorkManager runs alarmRefreshCallback about
+      // once a day (Android may delay it) and recomputes all dose-day alarms,
+      // so the one-shot alarm set keeps covering upcoming dose days even when
+      // the app is not opened for a while.
+      await Workmanager().initialize(alarmRefreshCallback);
+      await Workmanager().registerPeriodicTask(
+        'mama_meds_daily_alarm_refresh',
+        'mamaMedsDailyAlarmRefresh',
+        frequency: const Duration(hours: 24),
+        existingWorkPolicy: ExistingPeriodicWorkPolicy.keep,
+      );
     } catch (e) {
       debugPrint('Error initializing notification services: $e');
     }
